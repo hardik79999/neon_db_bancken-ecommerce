@@ -1,5 +1,4 @@
 import os
-
 from flask import Flask
 from config import Config
 from shop.extensions import db, migrate, bcrypt, jwt, mail
@@ -11,14 +10,12 @@ def create_app(config_class=Config):
 
     print("DATABASE_URL:", os.getenv("DATABASE_URL"))
 
-    # ✅ PEHLE extensions init kar
     db.init_app(app)
     migrate.init_app(app, db)
     bcrypt.init_app(app)
     jwt.init_app(app)
     mail.init_app(app)
 
-    # Blueprints
     from shop.auth.routes import auth_bp
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
 
@@ -37,6 +34,5 @@ def create_app(config_class=Config):
 
     return app
 
-if __name__ == '__main__':
-    app = create_app()
-    app.run(port=5000, debug=True)
+# 🔥 THIS LINE IS MUST
+app = create_app()
