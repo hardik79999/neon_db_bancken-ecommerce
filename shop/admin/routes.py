@@ -1,0 +1,251 @@
+from flask import Blueprint, request, jsonify
+from shop.models import Category, User, Role
+from shop.extensions import db
+from flask_jwt_extended import jwt_required, get_jwt_identity
+
+admin_bp = Blueprint('admin_bp',__name__)
+
+# ==============================================================================
+# 🛡️ HELPER DECORATOR: Check if user is Admin
+# ==============================================================================
+def admin_required(fn):
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        current_user_uuid = get_jwt_identity()
+        user = User.query.filter_by(uuid=current_user_uuid, is_active=True).first()
+        
+        if not user or user.role.role_name != 'admin':
+            return jsonify({"error": "Unauthorized access. Admin privileges required."}), 403
+            
+        return fn(*args, **kwargs)
+    
+    # endpoint names not mix 
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+# ==============================================================================
+# 🗂️ CATEGORY APIs (Admin Only)
+# ==============================================================================
+
+@admin_bp.route('/category', methods=['POST'])
+@admin_required
+def create_category():
+    data = request.get_json()
+    
+    # 1. Validation: Check if name is provided
+    if not data or not data.get('name'):
+        return jsonify({"error": "Category name is required"}), 400
+        
+    name = data.get('name')
+    description = data.get('description', '') # Optional
+    
+    # 2. Check if category already exists
+    existing_category = Category.query.filter_by(name=name).first()
+    if existing_category:
+        return jsonify({"error": f"Category '{name}' already exists"}), 409
+    
+    # 3. Create new Category
+    try:
+        new_category = Category(
+            name=name,
+            description=description,
+        )
+        db.session.add(new_category)
+        db.session.commit()
+        
+        return jsonify({
+            "message": "Category created successfully",
+            "category": {
+                "uuid": new_category.uuid,
+                "name": new_category.name,
+                "description": new_category.description,
+                "is_active": new_category.is_active
+            }
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to create category", "details": str(e)}), 500
+
+
+
+@admin_bp.route('/categories', methods=['GET'])
+def get_all_categories():
+
+    categories = Category.query.filter_by(is_active=True).all()
+    
+    result = []
+    for cat in categories:
+        result.append({
+            "uuid": cat.uuid,
+            "name": cat.name,
+            "description": cat.description
+        })
+        
+    return jsonify({
+        "total": len(result),
+        "categories": result
+    }), 200
+
+
+#=======================================================================================================================
+#=======================================================================================================================
+
+# 1. Get All Sellers API
+@admin_bp.route('/sellers', methods=['GET'])
+@admin_required
+def get_all_sellers():
+    seller_role = Role.query.filter_by(role_name='seller').first()
+    sellers = User.query.filter_by(role_id=seller_role.id).all()
+    
+    result = []
+    for seller in sellers:
+        result.append({
+            "uuid": seller.uuid,
+            "username": seller.username,
+            "email": seller.email,
+            "phone": seller.phone,
+            "is_active": seller.is_active,  
+            "is_verified": seller.is_verified,
+            "joined_at": seller.created_at
+        })
+        
+    return jsonify({
+        "total_sellers": len(result),
+        "sellers": result
+    }), 200
+
+
+# 2. Toggle Seller Status API (Active/Deactive)
+@admin_bp.route('/seller/<seller_uuid>/status', methods=['PUT'])
+@admin_required
+def toggle_seller_status(seller_uuid):
+    seller = User.query.filter_by(uuid=seller_uuid).first()
+    
+    if not seller or seller.role.role_name != 'seller':
+        return jsonify({"error": "Seller not found"}), 404
+        
+    # Toggle the status (True ko False, False ko True kar dega)
+    seller.is_active = not seller.is_active
+    db.session.commit()
+    
+    action = "Activated" if seller.is_active else "Deactivated"
+    
+    return jsonify({
+        "message": f"Seller '{seller.username}' has been {action} successfully.",
+        "current_status": "Active" if seller.is_active else "Deactive"
+    }), 200
+
+
+#=======================================================================================================================
+#=======================================================================================================================
+
+
+from flask_jwt_extended import get_jwt_identity
+from shop.models import User, Order, OrderTracking, OrderStatus
+
+@admin_bp.route('/order/<order_uuid>/status', methods=['PUT'])
+@admin_required
+def update_order_status(order_uuid):
+    data = request.get_json()
+    new_status_str = data.get('status') 
+    message = data.get('message', '')   
+    
+    if not new_status_str:
+        return jsonify({"error": "Status is required"}), 400
+        
+    order = Order.query.filter_by(uuid=order_uuid).first()
+    if not order:
+        return jsonify({"error": "Order not found"}), 404
+        
+    try:
+        new_status = OrderStatus[new_status_str.lower()]
+    except KeyError:
+        valid_statuses = [e.name for e in OrderStatus]
+        return jsonify({"error": f"Invalid status. Must be one of: {valid_statuses}"}), 400
+
+    # ==========================================================
+    # 🛡️ THE FIX: Admin
+    # ==========================================================
+    current_admin_uuid = get_jwt_identity()
+    admin_user = User.query.filter_by(uuid=current_admin_uuid).first()
+        
+    try:
+        order.status = new_status
+        order.updated_by = admin_user.id 
+        
+        tracking_entry = OrderTracking(
+            order_id=order.id,
+            status=new_status,
+            message=message,
+            is_active=True
+        )
+        db.session.add(tracking_entry)
+        db.session.commit()
+        
+        return jsonify({
+            "message": f"Order status updated to {new_status.name}",
+            "tracking_message": message
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to update status", "details": str(e)}), 500
+    
+
+
+
+#=================================================================================================================
+#=================================================================================================================
+
+from shop.models import SellerCategory
+
+@admin_bp.route('/category-requests', methods=['GET'])
+@admin_required
+def get_all_category_requests():
+    # Saari pending requests lao (is_approved == False)
+    pending_requests = SellerCategory.query.filter_by(is_approved=False, is_active=True).all()
+    
+    result = []
+    for req in pending_requests:
+        seller_name = User.query.get(req.seller_id).username
+        category_name = Category.query.get(req.category_id).name
+        
+        result.append({
+            "request_uuid": req.uuid,
+            "seller_name": seller_name,
+            "category_name": category_name,
+            "requested_at": req.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        })
+        
+    return jsonify({"total_pending": len(result), "requests": result}), 200
+
+
+@admin_bp.route('/category-request/<request_uuid>/approve', methods=['PUT'])
+@admin_required
+def approve_seller_category(request_uuid):
+
+    category_req = SellerCategory.query.filter_by(uuid=request_uuid).first()
+    
+    if not category_req:
+        return jsonify({"error": "Request not found"}), 404
+        
+    if category_req.is_approved:
+        return jsonify({"message": "This request is already approved."}), 400
+        
+    try:
+
+        category_req.is_approved = True
+        
+        db.session.commit()
+        
+        seller = User.query.get(category_req.seller_id)
+        category = Category.query.get(category_req.category_id)
+        
+        return jsonify({
+            "message": f"Success! Seller '{seller.username}' is now approved to sell in '{category.name}'."
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": "Failed to approve request", "details": str(e)}), 500
